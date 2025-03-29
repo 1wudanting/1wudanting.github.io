@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>吴老师的听写助手</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2"></script>
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pinyin-pro@3"></script>
+    <style>
+        .container { max-width: 800px; margin: 20px auto; padding: 20px; }
+        .section { margin: 20px 0; border: 1px solid #ddd; padding: 20px; border-radius: 8px; }
+        button { padding: 8px 15px; margin: 5px; background: #409EFF; color: white; border: none; border-radius: 4px; }
+        button:disabled { background: #c0c4cc; }
+        .config-panel { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
+        .pinyin { color: #666; font-size: 0.9em; margin-left: 10px; }
+        .answer-list { column-count: 2; }
+        .welcome-title { color: #2c3e50; text-align: center; }
+    </style>
+</head>
+<body>
+    <div id="app" class="container">
+        <!-- 数据导入 -->
+        <div class="section" v-if="!words.length">
+            <h3 class="welcome-title">欢迎使用吴老师的听写助手</h3>
+            <input type="file" @change="handleFile">
+            <p>文件要求：Excel文件需包含「词语」和「课数」两列</p >
+        </div>
+
+        <!-- 听写配置 -->
+        <div class="section" v-if="words.length && !isDictating">
+            <h3>听写设置</h3>
+            <div class="config-panel">
+                <div>
+                    <label>选择课时范围：</label>
+                    <div>
+                        从 <select v-model="lessonRange.start">
+                            <option v-for="n in maxLesson" :value="n">{{n}}</option>
+                        </select>
+                        到 <select v-model="lessonRange.end">
+                            <option v-for="n in maxLesson" :value="n" :disabled="n < lessonRange.start">{{n}}</option>
+                        </select>
+                        课
+                    </div>
+                </div>
+
+                <div>
+                    <label>听写模式：</label>
+                    <div>
+                        <label><input type="radio" v-model="mode" value="all"> 全部词语 </label>
+                        <label><input type="radio" v-model="mode" value="random"> 随机抽取 </label>
+                        <input v-if="mode === 'random'" type="number" v-model="randomCount" 
+                               min="1" :max="maxRandom" style="width:80px;margin-left:10px">
+                    </div>
+                </div>
+            </div>
+            <button @click="startDictation">开始听写</button>
+        </div>
+
+        <!-- 听写界面 -->
+        <div class="section" v-if="isDictating">
+            <h3>正在听写（{{mode === 'random' ? '随机模式' : '全部模式'}}）</h3>
+            <div v-if="!showAnswers">
+                <button @click="togglePlay">{{isPlaying ? '暂停' : '开始'}}</button>
+                <button @click="repeatCurrent" :disabled="!isPlaying">重复当前词</button>
+                <p>进度：{{currentIndex+1}}/{{currentWords.length}}</p >
+            </div>
+
+            <!-- 答案展示 -->
+            <div v-if="showAnswers">
+                <h3>听写结果</h3>
+                <div class="answer-list">
+                    <div v-for="(word, index) in currentWords" :key="index">
+                        {{index+1}}. {{word.word}} <span class="pinyin">{{word.pinyin}}</span>
+                    </div>
+                </div>
+                <button @click="reset">重新开始</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        words: [],
+        lessonRange: { start: 1, end: 1 },
+        mode: 'all',
+        randomCount: 10,
+        isDictating: false,
+        isPlaying: false,
+        currentIndex: -1,
+        timer: null,
+        currentWords: []
+    },
+    computed: {
+        maxLesson() {
+            return Math.max(...this.words.map(w => w.课数), 0) || 1
+        },
+        maxRandom() {
+            return this.filteredWords.length
+        },
+        filteredWords() {
+            return this.words.filter(w => 
+                w.课数 >= this.lessonRange.start && 
+                w.课数 <= this.lessonRange.end
+            )
+        },
+        showAnswers() {
+            return this.currentIndex >= this.currentWords.length
+        }
+    },
+    methods: {
+        // 处理Excel文件
+        handleFile(e) {
+            const file = e.target.files[0]
+            const reader = new FileReader()
+            
+            reader.onload = (e) => {
+                const data = new Uint8Array(e.target.result)
+                const workbook = XLSX.read(data, {type: 'array'})
+                const sheet = workbook.Sheets[workbook.SheetNames[0]]
+                this.words = XLSX.utils.sheet_to_json(sheet).map(word => ({
+                    word: word.词语,
+                    课数: word.课数,
+                    pinyin: pinyinPro.pinyin(word.词语, { 
+                        toneType: 'symbol',
+                        type: 'array'
+                    }).join(' ')
+                }))
+            }
+            reader.readAsArrayBuffer(file)
+        },
+
+        // 开始听写
+        startDictation() {
+            let words = [...this.filteredWords]
+            
+            if(this.mode === 'random') {
+                words = this.shuffle(words).slice(0, this.randomCount)
+            }
+
+            this.currentWords = words
+            this.isDictating = true
+            this.isPlaying = true
+            this.currentIndex = -1
+            this.playNextWord()
+        },
+
+        // 播放控制
+        togglePlay() {
+            this.isPlaying = !this.isPlaying
+            if(this.isPlaying) this.playNextWord()
+            else clearTimeout(this.timer)
+        },
+
+        repeatCurrent() {
+            if(this.currentIndex >= 0) {
+                this.speakCurrentWord()
+            }
+        },
+
+        playNextWord() {
+            if(!this.isPlaying || this.showAnswers) return
+            
+            this.currentIndex++
+            if(this.currentIndex >= this.currentWords.length) {
+                this.isPlaying = false
+                return
+            }
+            
+            this.speakCurrentWord()
+            
+            this.timer = setTimeout(() => {
+                this.playNextWord()
+            }, 5000)
+        },
+
+        speakCurrentWord() {
+            const word = this.currentWords[this.currentIndex].word
+            if(window.speechSynthesis) {
+                speechSynthesis.cancel()
+                const msg = new SpeechSynthesisUtterance(word)
+                msg.lang = 'zh-CN'
+                msg.rate = 0.8
+                speechSynthesis.speak(msg)
+            }
+        },
+
+        // 工具方法
+        shuffle(arr) {
+            for(let i = arr.length-1; i>0; i--){
+                const j = Math.floor(Math.random()*(i+1))
+                ;[arr[i], arr[j]] = [arr[j], arr[i]]
+            }
+            return arr
+        },
+
+        reset() {
+            this.isDictating = false
+            this.isPlaying = false
+            this.currentIndex = -1
+            this.currentWords = []
+        }
+    }
+})
+</script>
+</body>
+</html>
